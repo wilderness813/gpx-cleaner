@@ -25,7 +25,7 @@ Your Strava, Garmin, or other fitness trackers record these jumps as impossibly 
 - Broken maps with disconnected segments
 - Invalid personal records
 
-**GPS Cleaner** solves this by automatically detecting parallel trajectories in your GPX file, showing each as a separate "ride," and letting you pick the real one.
+**GPX Cleaner** solves this by automatically detecting parallel trajectories in your GPX file, showing each as a separate "ride," and letting you pick the real one.
 
 ---
 
@@ -55,8 +55,8 @@ Your Strava, Garmin, or other fitness trackers record these jumps as impossibly 
 
 ```bash
 # Clone the repository
-git clone https://github.com/wilderness813/gps-cleaner.git
-cd gps-cleaner
+git clone https://github.com/wilderness813/gpx-cleaner.git
+cd gpx-cleaner
 
 # Install dependencies
 pip install -r requirements.txt
