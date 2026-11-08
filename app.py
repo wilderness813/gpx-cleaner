@@ -524,11 +524,11 @@ with st.expander("How it works"):
     st.markdown("""
     1. **Upload** your GPX file
     2. **Detect** parallel trajectories (clusters)
-    3. **Select** the correct one
+    3. **Select** one or more clusters to merge
     4. **Download** the cleaned GPX
     
     This tool automatically finds multiple routes in your GPX file caused by GPS spoofing or jamming,
-    shows you statistics for each, and lets you choose the real one.
+    shows you statistics for each, and lets you choose which ones to keep.
     """)
 
 uploaded_file = st.file_uploader("Choose a GPX file", type=['gpx'])
@@ -607,7 +607,6 @@ if uploaded_file is not None:
                 help="Maximum speed used for clustering. Higher values = more points merged into one cluster."
             )
             
-            # Re-analyze button
             reanalyze = st.button("🔄 Re-analyze", use_container_width=True, key="reanalyze_button")
         
         # Check if we need to re-analyze
@@ -621,7 +620,6 @@ if uploaded_file is not None:
                     os.unlink(tmp_path)
                     st.stop()
                 
-                # Sort clusters by points count (descending)
                 filtered_clusters.sort(key=len, reverse=True)
                 
                 cluster_data = []
@@ -640,7 +638,7 @@ if uploaded_file is not None:
                 st.session_state['cluster_data'] = cluster_data
                 st.session_state['max_speed_kmh'] = max_speed_kmh
         
-        # Display clusters from session state
+        # Display clusters
         if 'cluster_data' in st.session_state:
             cluster_data = st.session_state['cluster_data']
             
@@ -670,76 +668,94 @@ if uploaded_file is not None:
                         col3.metric("Duration", f"{stats['time']/60:.1f} min")
                         col4.metric("Avg Speed", f"{stats['speed']:.1f} km/h")
             
-            selected_index = st.radio(
-                "Select the cluster to save:",
+            # === MULTISELECT CLUSTERS ===
+            selected_indices = st.multiselect(
+                "Select cluster(s) to merge into the final track:",
                 options=range(len(cluster_data)),
-                format_func=lambda i: f"Cluster {i+1}: {cluster_data[i]['place']} ({cluster_data[i]['stats']['points']} points, {cluster_data[i]['stats']['distance']/1000:.2f} km)"
+                format_func=lambda i: f"Cluster {i+1}: {cluster_data[i]['place']} ({cluster_data[i]['stats']['points']} points, {cluster_data[i]['stats']['distance']/1000:.2f} km)",
+                default=[0]
             )
             
             # === PROCESS BUTTON ===
             if st.button("Process", type="primary", use_container_width=True, key="process_button"):
-                with st.spinner("Processing track..."):
-                    clean_points = cluster_data[selected_index]['cluster']
-                    
-                    start_fixed = False
-                    end_fixed = False
-                    
-                    # Use current is_loop from the checkbox
-                    if is_loop:
-                        clean_points, start_fixed, end_fixed = fix_loop_endpoints(
-                            clean_points, first_point, last_point, ns, osrm_profile, max_speed_kmh, INTERVAL_SEC
-                        )
-                    
-                    # Interpolate gaps
-                    if INTERPOLATE:
-                        has_time = get_time(clean_points[0], ns) is not None
-                        if has_time and len(clean_points) > 1:
-                            interpolated = [clean_points[0]]
-                            
-                            for i in range(1, len(clean_points)):
-                                p1 = clean_points[i-1]
-                                p2 = clean_points[i]
+                if not selected_indices:
+                    st.error("Please select at least one cluster.")
+                else:
+                    with st.spinner("Processing track..."):
+                        # Merge all selected clusters
+                        merged_points = []
+                        for idx in selected_indices:
+                            merged_points.extend(cluster_data[idx]['cluster'])
+                        
+                        # Sort by time if available
+                        has_time = get_time(merged_points[0], ns) is not None
+                        if has_time:
+                            try:
+                                merged_points.sort(key=lambda p: get_time(p, ns) or datetime.min.replace(tzinfo=None))
+                            except TypeError:
+                                pass
+                        
+                        clean_points = merged_points
+                        
+                        start_fixed = False
+                        end_fixed = False
+                        
+                        # Loop endpoint fixing (only if exactly one cluster selected)
+                        if is_loop and len(selected_indices) == 1:
+                            clean_points, start_fixed, end_fixed = fix_loop_endpoints(
+                                clean_points, first_point, last_point, ns, osrm_profile, max_speed_kmh, INTERVAL_SEC
+                            )
+                        
+                        # Interpolate gaps
+                        if INTERPOLATE:
+                            has_time_check = get_time(clean_points[0], ns) is not None
+                            if has_time_check and len(clean_points) > 1:
+                                interpolated = [clean_points[0]]
                                 
-                                t1 = get_time(p1, ns)
-                                t2 = get_time(p2, ns)
+                                for i in range(1, len(clean_points)):
+                                    p1 = clean_points[i-1]
+                                    p2 = clean_points[i]
+                                    
+                                    t1 = get_time(p1, ns)
+                                    t2 = get_time(p2, ns)
+                                    
+                                    if t1 is None or t2 is None:
+                                        interpolated.append(p2)
+                                        continue
+                                    
+                                    dt = (t2 - t1).total_seconds()
+                                    if dt <= 0:
+                                        interpolated.append(p2)
+                                        continue
+                                    
+                                    dist = haversine(
+                                        float(p1.get('lat')), float(p1.get('lon')),
+                                        float(p2.get('lat')), float(p2.get('lon'))
+                                    )
+                                    
+                                    max_dist = (max_speed_kmh / 3.6) * dt
+                                    
+                                    if dist > max_dist * 1.5:
+                                        interp = interpolate_points(p1, p2, ns, INTERVAL_SEC, osrm_profile)
+                                        interpolated.extend(interp)
+                                    else:
+                                        interpolated.append(p2)
                                 
-                                if t1 is None or t2 is None:
-                                    interpolated.append(p2)
-                                    continue
-                                
-                                dt = (t2 - t1).total_seconds()
-                                if dt <= 0:
-                                    interpolated.append(p2)
-                                    continue
-                                
-                                dist = haversine(
-                                    float(p1.get('lat')), float(p1.get('lon')),
-                                    float(p2.get('lat')), float(p2.get('lon'))
-                                )
-                                
-                                max_dist = (max_speed_kmh / 3.6) * dt
-                                
-                                if dist > max_dist * 1.5:
-                                    interp = interpolate_points(p1, p2, ns, INTERVAL_SEC, osrm_profile)
-                                    interpolated.extend(interp)
-                                else:
-                                    interpolated.append(p2)
-                            
-                            clean_points = interpolated
-                    
-                    st.session_state['processed_points'] = clean_points
-                    st.session_state['start_fixed'] = start_fixed
-                    st.session_state['end_fixed'] = end_fixed
-                    st.session_state['processed'] = True
-                    
-                    if start_fixed:
-                        st.success("Start point fixed using end point as reference")
-                    if end_fixed:
-                        st.success("End point fixed using start point as reference")
-                    
-                    st.success("Track processed successfully! Use the download button below.")
+                                clean_points = interpolated
+                        
+                        st.session_state['processed_points'] = clean_points
+                        st.session_state['start_fixed'] = start_fixed
+                        st.session_state['end_fixed'] = end_fixed
+                        st.session_state['processed'] = True
+                        
+                        if start_fixed:
+                            st.success("Start point fixed using end point as reference")
+                        if end_fixed:
+                            st.success("End point fixed using start point as reference")
+                        
+                        st.success(f"Track processed successfully! Merged {len(selected_indices)} cluster(s), {len(clean_points)} points total.")
             
-            # === DOWNLOAD BUTTON (appears only after processing) ===
+            # === DOWNLOAD BUTTON ===
             if st.session_state.get('processed', False):
                 clean_points = st.session_state['processed_points']
                 
